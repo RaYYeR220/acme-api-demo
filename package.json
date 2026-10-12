@@ -1,0 +1,12 @@
+{
+  "name": "acme-api-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.3"
+  }
+}
