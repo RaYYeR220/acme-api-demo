@@ -1,0 +1,1 @@
+Lower the retry cap to 3 and the backoff base to 500 ms, run the tests, and tell me where we are.
