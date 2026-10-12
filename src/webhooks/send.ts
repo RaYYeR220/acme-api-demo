@@ -1,5 +1,5 @@
-const MAX_ATTEMPTS = 4;
-const BASE_DELAY_MS = 250;
+const MAX_ATTEMPTS = 3;
+const BASE_DELAY_MS = 500;
 const TIMEOUT_MS = 5000;
 
 export class WebhookError extends Error {
