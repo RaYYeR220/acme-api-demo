@@ -29,6 +29,7 @@ export async function send(url: string, body: unknown): Promise<void> {
       });
 
       if (!response.ok) {
+        await response.body?.cancel();
         throw new Error('webhook failed');
       }
 
