@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { send } from '../src/webhooks/send';
+import { send, WebhookError } from '../src/webhooks/send';
 
 describe('send', () => {
   beforeEach(() => {
@@ -22,31 +22,7 @@ describe('send', () => {
     await expect(send('https://example.com/hook', { a: 1 })).resolves.toBeUndefined();
   });
 
-  it('throws webhook failed on 400', async () => {
-    (fetch as any).mockResolvedValue(new Response(null, { status: 400 }));
-
-    await expect(send('https://example.com/hook', {})).rejects.toThrow('webhook failed');
-  });
-
-  it('throws webhook failed on 404', async () => {
-    (fetch as any).mockResolvedValue(new Response(null, { status: 404 }));
-
-    await expect(send('https://example.com/hook', {})).rejects.toThrow('webhook failed');
-  });
-
-  it('throws webhook failed on 500', async () => {
-    (fetch as any).mockResolvedValue(new Response(null, { status: 500 }));
-
-    await expect(send('https://example.com/hook', {})).rejects.toThrow('webhook failed');
-  });
-
-  it('throws an Error instance on non-ok response', async () => {
-    (fetch as any).mockResolvedValue(new Response(null, { status: 503 }));
-
-    await expect(send('https://example.com/hook', {})).rejects.toBeInstanceOf(Error);
-  });
-
-  it('calls fetch exactly once', async () => {
+  it('calls fetch exactly once on success', async () => {
     (fetch as any).mockResolvedValue(new Response(null, { status: 200 }));
 
     await send('https://example.com/hook', { a: 1 });
@@ -89,9 +65,107 @@ describe('send', () => {
     expect(options.method).toBe('POST');
   });
 
-  it('propagates a network error from fetch without wrapping it', async () => {
-    (fetch as any).mockRejectedValue(new Error('network down'));
+  it('aborts each attempt after 5 seconds', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    (fetch as any).mockResolvedValue(new Response(null, { status: 200 }));
 
-    await expect(send('https://example.com/hook', {})).rejects.toThrow('network down');
+    await send('https://example.com/hook', { a: 1 });
+
+    expect(timeoutSpy).toHaveBeenCalledWith(5000);
+  });
+
+  describe('retries', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('retries a non-ok response and resolves once a later attempt succeeds', async () => {
+      (fetch as any)
+        .mockResolvedValueOnce(new Response(null, { status: 500 }))
+        .mockResolvedValueOnce(new Response(null, { status: 200 }));
+
+      const promise = send('https://example.com/hook', { a: 1 });
+      await vi.runAllTimersAsync();
+
+      await expect(promise).resolves.toBeUndefined();
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries a network error and resolves once a later attempt succeeds', async () => {
+      (fetch as any)
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValueOnce(new Response(null, { status: 200 }));
+
+      const promise = send('https://example.com/hook', { a: 1 });
+      await vi.runAllTimersAsync();
+
+      await expect(promise).resolves.toBeUndefined();
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('waits 250ms before the first retry, then doubles the wait each time', async () => {
+      (fetch as any).mockResolvedValue(new Response(null, { status: 500 }));
+
+      const promise = send('https://example.com/hook', {});
+      promise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(499);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetch).toHaveBeenCalledTimes(3);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetch).toHaveBeenCalledTimes(4);
+
+      await expect(promise).rejects.toBeInstanceOf(WebhookError);
+    });
+
+    it('gives up after 4 attempts and throws a WebhookError carrying the url and attempt count', async () => {
+      (fetch as any).mockResolvedValue(new Response(null, { status: 500 }));
+
+      const promise = send('https://example.com/hook', {});
+      const assertion = expect(promise).rejects.toMatchObject({
+        url: 'https://example.com/hook',
+        attempts: 4,
+      });
+
+      await vi.runAllTimersAsync();
+
+      await assertion;
+      expect(fetch).toHaveBeenCalledTimes(4);
+    });
+
+    it('treats a timed-out attempt as a failure and retries, eventually throwing WebhookError', async () => {
+      vi.spyOn(AbortSignal, 'timeout').mockReturnValue(
+        AbortSignal.abort(new DOMException('The operation timed out.', 'TimeoutError')),
+      );
+      (fetch as any).mockImplementation((_url: string, options: { signal: AbortSignal }) =>
+        options.signal?.aborted
+          ? Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))
+          : Promise.resolve(new Response(null, { status: 200 })),
+      );
+
+      const promise = send('https://example.com/hook', {});
+      const assertion = expect(promise).rejects.toBeInstanceOf(WebhookError);
+
+      await vi.runAllTimersAsync();
+
+      await assertion;
+      expect(fetch).toHaveBeenCalledTimes(4);
+    });
   });
 });
